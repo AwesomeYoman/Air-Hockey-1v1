@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Air Hockey 1v1</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore-compat.js"></script>
+    <style>
+        body { background:#020617; color:white; touch-action: none; overflow: hidden; }
+        canvas { background: radial-gradient(circle, #1e293b 0%, #020617 100%); border:4px solid #334155; border-radius:12px; touch-action: none; }
+    </style>
+</head>
+
+<body class="flex flex-col items-center justify-center min-h-screen p-4">
+
+<!-- ===== 初始畫面 ===== -->
+<div id="setup" class="space-y-4 w-full max-w-sm">
+    <h1 class="text-4xl font-black text-cyan-400 text-center italic tracking-tighter">AIR HOCKEY</h1>
+    <input id="nameInput" placeholder="你的名字" class="w-full p-4 bg-slate-800 rounded-xl border border-slate-700 outline-none focus:border-cyan-500 transition-all" />
+    <button id="btnCreate" disabled class="w-full p-4 bg-cyan-600 rounded-xl font-bold text-lg disabled:opacity-30 shadow-lg active:scale-95 transition-all">建立房間</button>
+    <div class="flex space-x-2">
+        <input id="roomInput" placeholder="房間碼" class="flex-1 p-4 bg-slate-800 rounded-xl border border-slate-700 outline-none uppercase font-mono tracking-widest" />
+        <button id="btnJoin" disabled class="p-4 bg-emerald-600 rounded-xl font-bold disabled:opacity-30 shadow-lg active:scale-95 transition-all">加入</button>
+    </div>
+    <p id="authStatus" class="text-center text-slate-500 text-sm italic">正在連線至 Firebase...</p>
+</div>
+
+<!-- ===== 等待畫面 ===== -->
+<div id="lobby" class="hidden text-center space-y-6 w-full max-w-sm">
+    <div class="p-8 bg-slate-800 rounded-2xl border border-slate-700">
+        <p class="text-slate-400 mb-2">等待對手加入...</p>
+        <div id="roomCode" class="text-6xl font-black text-cyan-400 font-mono tracking-widest"></div>
+    </div>
+    <button onclick="location.reload()" class="text-slate-500 underline text-sm">取消建立</button>
+</div>
+
+<!-- ===== 遊戲畫面 ===== -->
+<div id="game" class="hidden w-full flex flex-col items-center">
+    <div class="w-full max-w-[360px] flex justify-between items-end mb-4 px-1">
+        <div>
+            <div class="text-[10px] text-slate-500 uppercase font-bold">Opponent</div>
+            <div id="score2" class="text-4xl font-black text-rose-500">0</div>
+        </div>
+        <div id="roomTag" class="text-[10px] bg-slate-800 px-3 py-1 rounded-full border border-slate-700 text-slate-400">ROOM: ---</div>
+        <div class="text-right">
+            <div class="text-[10px] text-slate-500 uppercase font-bold">You</div>
+            <div id="score1" class="text-4xl font-black text-cyan-500">0</div>
+        </div>
+    </div>
+    <canvas id="canvas" width="360" height="540"></canvas>
+    <p class="mt-4 text-slate-600 text-xs animate-pulse">滑動螢幕控制球桿</p>
+</div>
+
+<script>
+/* ================= Firebase 設定 ================= */
+const firebaseConfig = {
+    apiKey: "AIzaSyALbLez9kTlXPsoPlnpSEgfm3pffWnchwk", // 環境會自動注入
+    authDomain: "test-14399.firebaseapp.com",
+    projectId: "test-14399",
+    storageBucket: "test-14399.firebasestorage.app",
+    messagingSenderId: "774194573066",
+    appId: "1:774194573066:web:de970617d6331486ea54f3"
+};
+
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'hockey-game';
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db = firebase.firestore();
+
+/* ================= 狀態與常數 ================= */
+let user = null;
+let roomId = null;
+let role = null;
+let lastSync = 0;
+
+const PADDLE_R = 0.08; 
+const PUCK_R = 0.045;
+const GOAL_W = 0.4;
+
+const state = {
+    p1: { x: 0.5, y: 0.85 },
+    p2: { x: 0.5, y: 0.15 },
+    puck: { x: 0.5, y: 0.5, vx: 0, vy: 0 },
+    score: { p1: 0, p2: 0 },
+    status: 'idle'
+};
+
+/* ================= Auth ================= */
+auth.signInAnonymously();
+auth.onAuthStateChanged(u => {
+    if (!u) return;
+    user = u;
+    document.getElementById("authStatus").innerText = "連線成功，準備就緒";
+    document.getElementById("btnCreate").disabled = false;
+    document.getElementById("btnJoin").disabled = false;
+});
+
+/* ================= UI 控制 ================= */
+const setupView = document.getElementById("setup");
+const lobbyView = document.getElementById("lobby");
+const gameView = document.getElementById("game");
+
+function show(el) {
+    [setupView, lobbyView, gameView].forEach(v => v.classList.add("hidden"));
+    el.classList.remove("hidden");
+}
+
+/* ================= 遊戲核心 ================= */
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+// 房間路徑 (遵循規則 1)
+function getRoomRef(id) {
+    return db.collection("artifacts").doc(appId).collection("public").doc("data").collection("rooms").doc(id);
+}
+
+// 建立房間
+document.getElementById("btnCreate").onclick = async () => {
+    if (!user) return;
+    roomId = Math.random().toString(36).substr(2, 5).toUpperCase();
+    role = "host";
+    await getRoomRef(roomId).set({
+        hostId: user.uid,
+        status: "waiting",
+        p1: state.p1, p2: state.p2, puck: state.puck, score: state.score,
+        ts: Date.now()
+    });
+    document.getElementById("roomCode").innerText = roomId;
+    show(lobbyView);
+    listenRoom();
+};
+
+// 加入房間
+document.getElementById("btnJoin").onclick = async () => {
+    if (!user) return;
+    const id = document.getElementById("roomInput").value.toUpperCase();
+    if (!id) return;
+    const ref = getRoomRef(id);
+    const snap = await ref.get();
+
+    if (!snap.exists) return alert("找不到此房間碼");
+    if (snap.data().status !== "waiting") return alert("房間已滿或遊戲中");
+
+    roomId = id;
+    role = "client";
+    await ref.update({
+        clientId: user.uid,
+        status: "playing",
+        ts: Date.now()
+    });
+    show(gameView);
+    listenRoom();
+    requestAnimationFrame(loop);
+};
+
+// 監聽房間更新
+function listenRoom() {
+    getRoomRef(roomId).onSnapshot(s => {
+        if (!s.exists) return;
+        const d = s.data();
+        
+        // 同步得分
+        document.getElementById("score1").innerText = d.score.p1;
+        document.getElementById("score2").innerText = d.score.p2;
+        document.getElementById("roomTag").innerText = `ROOM: ${roomId}`;
+
+        // Host 監聽 Client 的位置
+        if (role === "host") {
+            state.p2 = d.p2;
+            if (d.status === "playing" && state.status !== "playing") {
+                state.status = "playing";
+                show(gameView);
+                requestAnimationFrame(loop);
+            }
+        } 
+        // Client 監聽 Host 計算出來的所有結果
+        else {
+            state.p1 = d.p1;
+            state.puck = d.puck;
+            state.score = d.score;
+        }
+    });
+}
+
+/* ================= 手機控控制 ================= */
+function handleInput(e) {
+    e.preventDefault();
+    if (state.status !== 'playing' && role !== 'client') {
+        if (role === 'host' && state.status !== 'playing') return;
+    }
+
+    const rect = canvas.getBoundingClientRect();
+    const t = e.touches ? e.touches[0] : e;
+    const x = (t.clientX - rect.left) / canvas.width;
+    const y = (t.clientY - rect.top) / canvas.height;
+
+    // 限制在自己半場
+    if (role === "host") {
+        state.p1.x = Math.max(PADDLE_R, Math.min(1 - PADDLE_R, x));
+        state.p1.y = Math.max(0.55, Math.min(1 - PADDLE_R, y));
+    } else {
+        state.p2.x = Math.max(PADDLE_R, Math.min(1 - PADDLE_R, x));
+        state.p2.y = Math.max(PADDLE_R, Math.min(0.45, y));
+    }
+    syncPos();
+}
+
+canvas.addEventListener("mousemove", handleInput);
+canvas.addEventListener("touchmove", handleInput, { passive: false });
+canvas.addEventListener("touchstart", handleInput, { passive: false });
+
+async function syncPos() {
+    const now = Date.now();
+    if (now - lastSync < 35) return; // 節流，減少 Firestore 負擔
+    lastSync = now;
+    
+    const updateObj = role === "host" ? { p1: state.p1 } : { p2: state.p2 };
+    getRoomRef(roomId).update(updateObj).catch(() => {});
+}
+
+/* ================= 物理引擎 (由 Host 運算) ================= */
+function loop() {
+    if (role === "host") {
+        updatePhysics();
+        syncPuck();
+    }
+    draw();
+    requestAnimationFrame(loop);
+}
+
+function updatePhysics() {
+    const p = state.puck;
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.985; p.vy *= 0.985; // 摩擦力
+
+    // 牆壁碰撞
+    if (p.x < PUCK_R || p.x > 1 - PUCK_R) {
+        p.vx *= -1;
+        p.x = p.x < PUCK_R ? PUCK_R : 1 - PUCK_R;
+    }
+
+    // 球門判定
+    const isGoalArea = p.x > 0.5 - GOAL_W/2 && p.x < 0.5 + GOAL_W/2;
+    if (p.y < PUCK_R) {
+        if (isGoalArea) { state.score.p1++; resetPuck(); }
+        else { p.vy *= -1; p.y = PUCK_R; }
+    } else if (p.y > 1 - PUCK_R) {
+        if (isGoalArea) { state.score.p2++; resetPuck(); }
+        else { p.vy *= -1; p.y = 1 - PUCK_R; }
+    }
+
+    // 球桿碰撞
+    [state.p1, state.p2].forEach(pdl => {
+        const dx = p.x - pdl.x, dy = p.y - pdl.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist < PUCK_R + PADDLE_R) {
+            const angle = Math.atan2(dy, dx);
+            const speed = 0.025;
+            p.vx = Math.cos(angle) * speed;
+            p.vy = Math.sin(angle) * speed;
+            p.x = pdl.x + Math.cos(angle) * (PUCK_R + PADDLE_R);
+            p.y = pdl.y + Math.sin(angle) * (PUCK_R + PADDLE_R);
+        }
+    });
+}
+
+function resetPuck() {
+    state.puck = { x: 0.5, y: 0.5, vx: 0, vy: 0 };
+}
+
+async function syncPuck() {
+    getRoomRef(roomId).update({ puck: state.puck, score: state.score }).catch(() => {});
+}
+
+/* ================= 繪圖 ================= */
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // 畫球門與中線
+    ctx.strokeStyle = "#334155";
+    ctx.setLineDash([10, 10]);
+    ctx.beginPath(); ctx.moveTo(0, canvas.height/2); ctx.lineTo(canvas.width, canvas.height/2); ctx.stroke();
+    ctx.setLineDash([]);
+    
+    ctx.fillStyle = "#1e293b";
+    ctx.fillRect(canvas.width*(0.5-GOAL_W/2), 0, canvas.width*GOAL_W, 6);
+    ctx.fillRect(canvas.width*(0.5-GOAL_W/2), canvas.height-6, canvas.width*GOAL_W, 6);
+
+    // 畫球與球桿
+    drawC(state.p1, "#06b6d4", PADDLE_R * canvas.width, true);
+    drawC(state.p2, "#f43f5e", PADDLE_R * canvas.width, true);
+    drawC(state.puck, "#ffffff", PUCK_R * canvas.width, false);
+}
+
+function drawC(o, c, r, isPaddle) {
+    ctx.shadowBlur = isPaddle ? 15 : 5;
+    ctx.shadowColor = c;
+    ctx.fillStyle = c;
+    ctx.beginPath();
+    ctx.arc(o.x * canvas.width, o.y * canvas.height, r, 0, Math.PI * 2);
+    ctx.fill();
+    if (isPaddle) {
+        ctx.strokeStyle = "rgba(255,255,255,0.4)";
+        ctx.lineWidth = 3;
+        ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+}
+</script>
+</body>
+</html>
