@@ -10,7 +10,7 @@
     <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore-compat.js"></script>
     <style>
         body { background:#020617; color:white; touch-action: none; overflow: hidden; }
-        canvas { background: radial-gradient(circle, #1e293b 0%, #020617 100%); border:4px solid #334155; border-radius:12px; touch-action: none; }
+        canvas { background: radial-gradient(circle, #1e293b 0%, #020617 100%); border:4px solid #334155; border-radius:12px; touch-action: none; width: 100%; max-width: 360px; height: auto; }
     </style>
 </head>
 
@@ -23,7 +23,7 @@
     <button id="btnCreate" disabled class="w-full p-4 bg-cyan-600 rounded-xl font-bold text-lg disabled:opacity-30 shadow-lg active:scale-95 transition-all">建立房間</button>
     <div class="flex space-x-2">
         <input id="roomInput" placeholder="房間碼" class="flex-1 p-4 bg-slate-800 rounded-xl border border-slate-700 outline-none uppercase font-mono tracking-widest" />
-        <button id="btnJoin" disabled class="p-4 bg-emerald-600 rounded-xl font-bold disabled:opacity-30 shadow-lg active:scale-95 transition-all">加入</button>
+        <button id="btnJoin" disabled class="p-4 bg-emerald-600 rounded-xl font-bold disabled:opacity-30 shadow-lg active:scale-95 transition-all">加入房間</button>
     </div>
     <p id="authStatus" class="text-center text-slate-500 text-sm italic">正在連線至 Firebase...</p>
 </div>
@@ -41,23 +41,23 @@
 <div id="game" class="hidden w-full flex flex-col items-center">
     <div class="w-full max-w-[360px] flex justify-between items-end mb-4 px-1">
         <div>
-            <div class="text-[10px] text-slate-500 uppercase font-bold">Opponent</div>
+            <div class="text-[10px] text-slate-500 uppercase font-bold">對手 Score</div>
             <div id="score2" class="text-4xl font-black text-rose-500">0</div>
         </div>
         <div id="roomTag" class="text-[10px] bg-slate-800 px-3 py-1 rounded-full border border-slate-700 text-slate-400">ROOM: ---</div>
         <div class="text-right">
-            <div class="text-[10px] text-slate-500 uppercase font-bold">You</div>
+            <div class="text-[10px] text-slate-500 uppercase font-bold">你的 Score</div>
             <div id="score1" class="text-4xl font-black text-cyan-500">0</div>
         </div>
     </div>
     <canvas id="canvas" width="360" height="540"></canvas>
-    <p class="mt-4 text-slate-600 text-xs animate-pulse">滑動螢幕控制球桿</p>
+    <p class="mt-4 text-slate-600 text-xs animate-pulse">拖曳底部控制你的球桿</p>
 </div>
 
 <script>
 /* ================= Firebase 設定 ================= */
 const firebaseConfig = {
-    apiKey: "AIzaSyALbLez9kTlXPsoPlnpSEgfm3pffWnchwk", // 環境會自動注入
+    apiKey: "AIzaSyALbLez9kTlXPsoPlnpSEgfm3pffWnchwk",
     authDomain: "test-14399.firebaseapp.com",
     projectId: "test-14399",
     storageBucket: "test-14399.firebasestorage.app",
@@ -73,13 +73,14 @@ const db = firebase.firestore();
 /* ================= 狀態與常數 ================= */
 let user = null;
 let roomId = null;
-let role = null;
+let role = null; // 'host' (p1) or 'client' (p2)
 let lastSync = 0;
 
 const PADDLE_R = 0.08; 
 const PUCK_R = 0.045;
 const GOAL_W = 0.4;
 
+// 全域座標系：P1 在下(0.85)，P2 在上(0.15)
 const state = {
     p1: { x: 0.5, y: 0.85 },
     p2: { x: 0.5, y: 0.15 },
@@ -112,12 +113,10 @@ function show(el) {
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 
-// 房間路徑 (遵循規則 1)
 function getRoomRef(id) {
     return db.collection("artifacts").doc(appId).collection("public").doc("data").collection("rooms").doc(id);
 }
 
-// 建立房間
 document.getElementById("btnCreate").onclick = async () => {
     if (!user) return;
     roomId = Math.random().toString(36).substr(2, 5).toUpperCase();
@@ -133,7 +132,6 @@ document.getElementById("btnCreate").onclick = async () => {
     listenRoom();
 };
 
-// 加入房間
 document.getElementById("btnJoin").onclick = async () => {
     if (!user) return;
     const id = document.getElementById("roomInput").value.toUpperCase();
@@ -156,54 +154,56 @@ document.getElementById("btnJoin").onclick = async () => {
     requestAnimationFrame(loop);
 };
 
-// 監聽房間更新
 function listenRoom() {
     getRoomRef(roomId).onSnapshot(s => {
         if (!s.exists) return;
         const d = s.data();
         
-        // 同步得分
-        document.getElementById("score1").innerText = d.score.p1;
-        document.getElementById("score2").innerText = d.score.p2;
-        document.getElementById("roomTag").innerText = `ROOM: ${roomId}`;
-
-        // Host 監聽 Client 的位置
-        if (role === "host") {
+        // 分數顯示與角色視角相關
+        if (role === 'host') {
+            document.getElementById("score1").innerText = d.score.p1;
+            document.getElementById("score2").innerText = d.score.p2;
             state.p2 = d.p2;
             if (d.status === "playing" && state.status !== "playing") {
                 state.status = "playing";
                 show(gameView);
                 requestAnimationFrame(loop);
             }
-        } 
-        // Client 監聽 Host 計算出來的所有結果
-        else {
+        } else {
+            // Client 視角：score1 顯示自己的分(p2), score2 顯示對手的(p1)
+            document.getElementById("score1").innerText = d.score.p2;
+            document.getElementById("score2").innerText = d.score.p1;
             state.p1 = d.p1;
+            // 平滑化球的位置更新
             state.puck = d.puck;
             state.score = d.score;
         }
     });
 }
 
-/* ================= 手機控控制 ================= */
+/* ================= 操作優化：雙方皆操作下方 ================= */
 function handleInput(e) {
     e.preventDefault();
-    if (state.status !== 'playing' && role !== 'client') {
+    if (state.status !== 'playing') {
         if (role === 'host' && state.status !== 'playing') return;
     }
 
     const rect = canvas.getBoundingClientRect();
     const t = e.touches ? e.touches[0] : e;
-    const x = (t.clientX - rect.left) / canvas.width;
-    const y = (t.clientY - rect.top) / canvas.height;
+    // 獲取本地觸控座標 (0~1)
+    const lx = (t.clientX - rect.left) / canvas.width;
+    const ly = (t.clientY - rect.top) / canvas.height;
 
-    // 限制在自己半場
     if (role === "host") {
-        state.p1.x = Math.max(PADDLE_R, Math.min(1 - PADDLE_R, x));
-        state.p1.y = Math.max(0.55, Math.min(1 - PADDLE_R, y));
+        // Host 在全域是 P1，下半場
+        state.p1.x = Math.max(PADDLE_R, Math.min(1 - PADDLE_R, lx));
+        state.p1.y = Math.max(0.55, Math.min(1 - PADDLE_R, ly));
     } else {
-        state.p2.x = Math.max(PADDLE_R, Math.min(1 - PADDLE_R, x));
-        state.p2.y = Math.max(PADDLE_R, Math.min(0.45, y));
+        // Client 在全域是 P2，原本在上半場，但為了讓 Client 也在下半場操作：
+        // 我們將 Client 的「本地下方觸控」映射到「全域上方座標」
+        // 本地下方是 ly > 0.5 -> 映射到全域 y < 0.5 (即 1 - ly)
+        state.p2.x = Math.max(PADDLE_R, Math.min(1 - PADDLE_R, 1 - lx));
+        state.p2.y = Math.max(PADDLE_R, Math.min(0.45, 1 - ly));
     }
     syncPos();
 }
@@ -214,14 +214,14 @@ canvas.addEventListener("touchstart", handleInput, { passive: false });
 
 async function syncPos() {
     const now = Date.now();
-    if (now - lastSync < 35) return; // 節流，減少 Firestore 負擔
+    if (now - lastSync < 60) return; // 提高節流時間至 60ms，顯著減少 LAG
     lastSync = now;
     
     const updateObj = role === "host" ? { p1: state.p1 } : { p2: state.p2 };
     getRoomRef(roomId).update(updateObj).catch(() => {});
 }
 
-/* ================= 物理引擎 (由 Host 運算) ================= */
+/* ================= 物理與繪圖 (視角轉換) ================= */
 function loop() {
     if (role === "host") {
         updatePhysics();
@@ -235,15 +235,10 @@ function updatePhysics() {
     const p = state.puck;
     p.x += p.vx;
     p.y += p.vy;
-    p.vx *= 0.985; p.vy *= 0.985; // 摩擦力
+    p.vx *= 0.985; p.vy *= 0.985;
 
-    // 牆壁碰撞
-    if (p.x < PUCK_R || p.x > 1 - PUCK_R) {
-        p.vx *= -1;
-        p.x = p.x < PUCK_R ? PUCK_R : 1 - PUCK_R;
-    }
+    if (p.x < PUCK_R || p.x > 1 - PUCK_R) { p.vx *= -1; p.x = p.x < PUCK_R ? PUCK_R : 1 - PUCK_R; }
 
-    // 球門判定
     const isGoalArea = p.x > 0.5 - GOAL_W/2 && p.x < 0.5 + GOAL_W/2;
     if (p.y < PUCK_R) {
         if (isGoalArea) { state.score.p1++; resetPuck(); }
@@ -253,7 +248,6 @@ function updatePhysics() {
         else { p.vy *= -1; p.y = 1 - PUCK_R; }
     }
 
-    // 球桿碰撞
     [state.p1, state.p2].forEach(pdl => {
         const dx = p.x - pdl.x, dy = p.y - pdl.y;
         const dist = Math.sqrt(dx*dx + dy*dy);
@@ -268,40 +262,53 @@ function updatePhysics() {
     });
 }
 
-function resetPuck() {
-    state.puck = { x: 0.5, y: 0.5, vx: 0, vy: 0 };
-}
+function resetPuck() { state.puck = { x: 0.5, y: 0.5, vx: 0, vy: 0 }; }
 
 async function syncPuck() {
     getRoomRef(roomId).update({ puck: state.puck, score: state.score }).catch(() => {});
 }
 
-/* ================= 繪圖 ================= */
+// 核心繪圖邏輯：根據角色翻轉座標
 function draw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const w = canvas.width, h = canvas.height;
     
-    // 畫球門與中線
+    // 輔助函式：根據角色轉換全域座標為顯示座標
+    const toLocal = (pos) => {
+        if (role === 'host') return { x: pos.x * w, y: pos.y * h };
+        // Client 視角翻轉 180 度，讓全域 y=0.15 (P2) 顯示在下方
+        return { x: (1 - pos.x) * w, y: (1 - pos.y) * h };
+    };
+
+    // 畫背景線
     ctx.strokeStyle = "#334155";
     ctx.setLineDash([10, 10]);
-    ctx.beginPath(); ctx.moveTo(0, canvas.height/2); ctx.lineTo(canvas.width, canvas.height/2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, h/2); ctx.lineTo(w, h/2); ctx.stroke();
     ctx.setLineDash([]);
     
+    // 畫球門
     ctx.fillStyle = "#1e293b";
-    ctx.fillRect(canvas.width*(0.5-GOAL_W/2), 0, canvas.width*GOAL_W, 6);
-    ctx.fillRect(canvas.width*(0.5-GOAL_W/2), canvas.height-6, canvas.width*GOAL_W, 6);
+    ctx.fillRect(w*(0.5-GOAL_W/2), 0, w*GOAL_W, 6);
+    ctx.fillRect(w*(0.5-GOAL_W/2), h-6, w*GOAL_W, 6);
+
+    // 取得繪圖座標
+    const lp1 = toLocal(state.p1);
+    const lp2 = toLocal(state.p2);
+    const lpk = toLocal(state.puck);
 
     // 畫球與球桿
-    drawC(state.p1, "#06b6d4", PADDLE_R * canvas.width, true);
-    drawC(state.p2, "#f43f5e", PADDLE_R * canvas.width, true);
-    drawC(state.puck, "#ffffff", PUCK_R * canvas.width, false);
+    // P1 在 Host 視角是自己(藍色)，在 Client 視角是對手
+    drawC(lp1, role === 'host' ? "#06b6d4" : "#f43f5e", PADDLE_R * w, true);
+    drawC(lp2, role === 'client' ? "#06b6d4" : "#f43f5e", PADDLE_R * w, true);
+    drawC(lpk, "#ffffff", PUCK_R * w, false);
 }
 
-function drawC(o, c, r, isPaddle) {
+function drawC(pos, c, r, isPaddle) {
     ctx.shadowBlur = isPaddle ? 15 : 5;
     ctx.shadowColor = c;
     ctx.fillStyle = c;
     ctx.beginPath();
-    ctx.arc(o.x * canvas.width, o.y * canvas.height, r, 0, Math.PI * 2);
+    ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
     ctx.fill();
     if (isPaddle) {
         ctx.strokeStyle = "rgba(255,255,255,0.4)";
